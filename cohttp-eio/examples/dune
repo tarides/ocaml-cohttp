@@ -12,6 +12,10 @@
   ca-certs
   mirage-crypto-rng.unix))
 
+(executable
+ (name client_proxy)
+ (libraries cohttp-eio eio_main eio.unix fmt cmdliner base64))
+
 (alias
  (name runtest)
  (package cohttp-eio)
