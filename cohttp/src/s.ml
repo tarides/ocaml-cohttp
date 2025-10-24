@@ -168,3 +168,13 @@ module type Body = sig
   val map : (string -> string) -> t -> t
   val transfer_encoding : t -> Transfer.encoding
 end
+
+
+(** A [Connection_cache] handles http requests. It not necessarily caches
+    connections. *)
+module type Connection_cache = sig
+  type t
+
+  val call : t -> call
+  (** Process a request. Please see {!type:call}. *)
+end

@@ -11,6 +11,38 @@ module type BASE = sig
 
   val map_context : 'a with_context -> ('a -> 'b) -> 'b with_context
 
+type call =
+  ?headers:Http.Header.t ->
+  ?body:Body.t ->
+  ?absolute_form:bool ->
+  Http.Method.t ->
+  Uri.t ->
+  (Cohttp.Response.t * Body.t) Lwt.t
+(** [call ?headers ?body method uri] Function type used to handle http requests
+
+    @return
+      [(response, response_body)] [response_body] is not buffered, but stays on
+      the wire until consumed. It must therefore be consumed in a timely manner.
+      Otherwise the connection would stay open and a file descriptor leak may be
+      caused. Following responses would get blocked. Functions in the {!Body}
+      module can be used to consume [response_body]. Use {!Body.drain_body} if
+      you don't consume the body by other means.
+
+    Leaks are detected by the GC and logged as debug messages, these can be
+    enabled activating the debug logging. For example, this can be done as
+    follows in [cohttp-lwt-unix]
+
+    {[
+      Cohttp_lwt_unix.Debug.activate_debug ();
+      Logs.set_level (Some Logs.Warning)
+    ]}
+
+    @raise {!Connection.Retry}
+      on recoverable errors like the remote endpoint closing the connection
+      gracefully. Even non-idempotent requests are guaranteed to not have been
+      processed by the remote endpoint and should be retried. But beware that a
+      [`Stream] [body] may have been consumed. *)
+
   val call :
     (?headers:Http.Header.t ->
     ?body:body ->
