@@ -211,20 +211,35 @@ module StringSet = Set.Make (String)
 let tunnel_schemes = StringSet.of_list [ "https" ]
 
 module No_proxy = struct
-  type pattern = Name of string | Ipaddr_prefix of Ipaddr.Prefix.t
+  type pattern =
+    | Name of string
+    | Domain of string
+    | Ipaddr_prefix of Ipaddr.Prefix.t
+
   type t = Wildcard | Patterns of pattern list
 
-  let trim_dots ~first_leading s =
-    let segments = String.split_on_char '.' s in
-    let segments =
-      match (first_leading, segments) with
-      | false, segments -> segments
-      | true, "" :: segments ->
-          (* drop first . if first_leading *)
-          segments
-      | true, segments -> segments
-    in
-    segments
+  let string_equal_caseless a b =
+    String.equal (String.lowercase_ascii a) (String.lowercase_ascii b)
+
+  let name_in_domain ~domain ~name =
+    match string_equal_caseless domain name with
+    | true ->
+        (* host example.com matches domain example.com *)
+        true
+    | false ->
+        let suffix = Printf.sprintf ".%s" domain |> String.lowercase_ascii in
+        let name = String.lowercase_ascii name in
+        String.ends_with ~suffix name
+
+  let is_domain name =
+    match name.[0] with
+    | '.' -> true
+    | _ -> false
+    | exception Invalid_argument _ -> false
+
+  let trim_dots s =
+    s
+    |> String.split_on_char '.'
     |> List.fold_left
          (fun (head, tail) e ->
            match e with
@@ -232,7 +247,7 @@ module No_proxy = struct
                (* collect in tail *)
                (head, e :: tail)
            | content ->
-               (* we got something thats not empty, append tail to head clear tail *)
+               (* we got something thats not empty, append tail to head & clear tail *)
                (content :: (tail @ head), []))
          ([], [])
     |> fst
@@ -245,7 +260,11 @@ module No_proxy = struct
     | Error _ -> (
         match Ipaddr.Prefix.of_string pattern with
         | Ok prefix -> Ipaddr_prefix prefix
-        | Error _ -> Name (trim_dots ~first_leading:true pattern))
+        | Error _ -> (
+            let dotless = trim_dots pattern in
+            match is_domain pattern with
+            | true -> Domain dotless
+            | false -> Name dotless))
 
   let parse_definition s =
     match s with
@@ -264,6 +283,31 @@ module No_proxy = struct
   let parse = function
     | None -> Patterns []
     | Some definition -> parse_definition definition
+
+  (** [applicable patterns ~host] is true when the host matches the pattern *)
+  let applicable patterns ~host =
+    match host with
+    | "" -> true
+    | host -> (
+        match patterns with
+        | Wildcard -> true
+        | Patterns patterns -> (
+            match Ipaddr.of_string host with
+            | Ok host_ip ->
+                List.exists
+                  (function
+                    | Name _ | Domain _ -> false
+                    | Ipaddr_prefix network -> Ipaddr.Prefix.mem host_ip network)
+                  patterns
+            | Error _ ->
+                List.exists
+                  (function
+                    | Ipaddr_prefix _ -> false
+                    | Name pattern -> string_equal_caseless pattern host
+                    | Domain domain ->
+                        let name = trim_dots host in
+                        name_in_domain ~domain ~name)
+                  patterns))
 end
 
 module Proxy = struct
@@ -308,12 +352,18 @@ module Proxy = struct
        uri ->
     let scheme = Option.value ~default:"" (Uri.scheme uri) in
     let proxy =
-      match List.assoc scheme t.proxies with
-      | proxy -> Some proxy
-      | exception Not_found -> (
-          match StringSet.mem scheme tunnel_schemes with
-          | true -> t.tunnel
-          | false -> t.direct)
+      match
+        No_proxy.applicable t.no_proxy_patterns
+          ~host:(Uri.host_with_default ~default:"" uri)
+      with
+      | true -> None
+      | false -> (
+          match List.assoc scheme t.proxies with
+          | proxy -> Some proxy
+          | exception Not_found -> (
+              match StringSet.mem scheme tunnel_schemes with
+              | true -> t.tunnel
+              | false -> t.direct))
     in
     match proxy with
     | None ->
