@@ -315,19 +315,19 @@ module Proxy = struct
   module Direct = Cache
   module Tunnel = No_cache
 
-  type proxy = Direct of Direct.t | Tunnel of Tunnel.t
-
   type t = {
-    proxies : (string * proxy) list;
-    no_proxy : Direct.t;
+    proxies : (string * S.cache_call) list;
+    no_proxy : S.cache_call;
     no_proxy_patterns : No_proxy.t;
-    direct : proxy option;
-    tunnel : proxy option;
+    direct : S.cache_call option;
+    tunnel : S.cache_call option;
   }
 
-  let create ?keep ?retry ?parallel ?depth ?(scheme_proxy = []) ?all_proxy:_
+  let create ?keep ?retry ?parallel ?depth ?(scheme_proxy = []) ?all_proxy
       ?no_proxy ?proxy_headers:_ ~net:_ () =
-    let create_default () = Direct.create ?keep ?retry ?parallel ?depth () in
+    let create_default () =
+      Direct.create ?keep ?retry ?parallel ?depth () |> Direct.call
+    in
     let no_proxy_patterns = No_proxy.parse no_proxy in
     let no_proxy = create_default () in
 
@@ -336,21 +336,28 @@ module Proxy = struct
         (fun (scheme, _uri) ->
           match StringSet.mem scheme tunnel_schemes with
           | true ->
-              let tunnel = Tunnel.create () in
-              (scheme, Tunnel tunnel)
+              let tunnel = Tunnel.create () |> Tunnel.call in
+              (scheme, tunnel)
           | false ->
-              let direct = no_proxy in
-              (scheme, Direct direct))
+              let direct =
+                Direct.create ?keep ?retry ?parallel ?depth () |> Direct.call
+              in
+              (scheme, direct))
         scheme_proxy
     in
-    let direct = None in
-    let tunnel = None in
+    let direct, tunnel =
+      match all_proxy with
+      | None -> None, None
+      | Some _uri_TODO ->
+          let direct = Direct.create ?keep ?retry ?parallel ?depth () |> Direct.call in
+          let tunnel = Tunnel.create () |> Tunnel.call in
+          (Some direct, Some tunnel)
+
+    in
     { proxies; no_proxy; direct; tunnel; no_proxy_patterns }
 
   let call (t : t) : S.cache_call =
-   fun _t ~sw:_ ?headers:_ ?body:_ ?(chunked = false) ?absolute_form:_ _meth
-       uri ->
-    let scheme = Option.value ~default:"" (Uri.scheme uri) in
+   fun t' ~sw ?headers ?body ?chunked ?absolute_form meth uri ->
     let proxy =
       match
         No_proxy.applicable t.no_proxy_patterns
@@ -358,6 +365,7 @@ module Proxy = struct
       with
       | true -> None
       | false -> (
+          let scheme = Option.value ~default:"" (Uri.scheme uri) in
           match List.assoc scheme t.proxies with
           | proxy -> Some proxy
           | exception Not_found -> (
@@ -366,9 +374,6 @@ module Proxy = struct
               | false -> t.direct))
     in
     match proxy with
-    | None ->
-        failwith "noproxy"
-        (* No_cache.call t.no_proxy ?headers ?body ?absolute_form meth uri *)
-    | Some (Direct proxy) -> failwith "Todo direct"
-    | Some (Tunnel proxy) -> failwith "TODO tunnel"
+    | None -> t.no_proxy ~sw ?headers ?body ?chunked ?absolute_form t' meth uri
+    | Some proxy -> proxy ~sw ?headers ?body ?chunked ?absolute_form t' meth uri
 end
