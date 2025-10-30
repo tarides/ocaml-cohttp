@@ -25,7 +25,7 @@ val make :
       Unix path. *)
 
 val make_generic :
-  (sw:Switch.t -> Uri.t -> Eio.Net.Sockaddr.stream * _ Eio.Flow.two_way) -> t
+  (sw:Switch.t -> Uri.t -> _ Eio.Flow.two_way) -> t
 (** [make_generic connect] is an HTTP client that uses [connect] to get the
     connection to use for a given URI. *)
 

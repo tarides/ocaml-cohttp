@@ -170,7 +170,7 @@ module type Connection = sig
 
   val length : t -> int
   (** Number of unfulfilled requests. This includes requests already sent out
-      and requests still waitung to be sent. *)
+      and requests still waiting to be sent. *)
 
   val notify : t -> unit Net.IO.t
   (** Request notification on change of [length] and on closing. *)

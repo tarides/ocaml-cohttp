@@ -1,4 +1,5 @@
 open Eio.Std
+open Utils
 
 type t = S.t
 
@@ -14,9 +15,50 @@ include
 
       let map_context v f t ~sw = f (v t ~sw)
 
-      let call t ~sw ?headers ?body ?(chunked = false) meth uri =
-        (Atomic.get cache) t ~sw ?headers ?body ~chunked ~absolute_form:false
-          meth uri
+      let call (t : t) ~sw ?headers ?body ?(chunked = false) meth uri =
+        let socket = t ~sw uri in
+        let body_length =
+          if chunked then None
+          else
+            match body with
+            | None -> Some 0L
+            | Some (Eio.Resource.T (body, ops)) ->
+                let module X = (val Eio.Resource.get ops Eio.Flow.Pi.Source) in
+                List.find_map
+                  (function
+                    | Body.String m ->
+                        Some (String.length (m body) |> Int64.of_int)
+                    | _ -> None)
+                  X.read_methods
+        in
+        let request =
+          Cohttp.Request.make_for_client ?headers
+            ~chunked:(Option.is_none body_length)
+            ?body_length meth uri
+        in
+        Eio.Buf_write.with_flow socket @@ fun output ->
+        let () =
+          Eio.Fiber.fork ~sw @@ fun () ->
+          Io.Request.write ~flush:false
+            (fun writer ->
+              match body with
+              | None -> ()
+              | Some body -> flow_to_writer body writer Io.Request.write_body)
+            request output
+        in
+        let input = Eio.Buf_read.of_flow ~max_size:max_int socket in
+        match Io.Response.read input with
+        | `Eof -> failwith "connection closed by peer"
+        | `Invalid reason -> failwith reason
+        | `Ok response -> (
+            match Cohttp.Response.has_body response with
+            | `No -> (response, Eio.Flow.string_source "")
+            | `Yes | `Unknown ->
+                let body =
+                  let reader = Io.Response.make_body_reader response input in
+                  flow_of_reader (fun () -> Io.Response.read_body_chunk reader)
+                in
+                (response, body))
     end)
     (Io.IO)
 
@@ -40,6 +82,29 @@ let tcp_address ~net uri =
   | ip :: _ -> ip
   | [] -> failwith "failed to resolve hostname"
 
+type address =
+  | Https of Uri.t * Eio.Net.Sockaddr.stream
+  | Plain of Uri.t * Eio.Net.Sockaddr.stream
+
+let address_of_uri net uri =
+    match Uri.scheme uri with
+    | Some "httpunix" ->
+        (* FIXME: while there is no standard, http+unix seems more widespread *)
+        Plain (uri, unix_address uri)
+    | Some "http" -> Plain (uri, tcp_address ~net uri)
+    | Some "https" -> Https (uri, tcp_address ~net uri)
+    | x ->
+       Fmt.failwith "Unknown scheme %a"
+         Fmt.(option ~none:(any "None") Dump.string)
+         x
+
+let socket_of_address ~sw net https address = match address with
+  | Plain (_, addr) -> (Eio.Net.connect ~sw net addr :> S.connection) 
+  | Https (uri, addr) -> 
+     match https with
+     | Some wrap -> wrap uri @@ Eio.Net.connect ~sw net addr
+     | None -> Fmt.failwith "HTTPS not enabled (for %a)" Uri.pp uri
+
 let make ~https net : S.t =
   let net = (net :> [ `Generic ] Eio.Net.ty r) in
   let https =
@@ -48,21 +113,5 @@ let make ~https net : S.t =
          option)
   in
   fun ~sw uri ->
-    match Uri.scheme uri with
-    | Some "httpunix" ->
-        (* FIXME: while there is no standard, http+unix seems more widespread *)
-        let addr = unix_address uri in
-        (addr, (Eio.Net.connect ~sw net addr :> S.connection))
-    | Some "http" ->
-        let addr = tcp_address ~net uri in
-        (addr, (Eio.Net.connect ~sw net addr :> S.connection))
-    | Some "https" -> (
-        match https with
-        | Some wrap ->
-            let addr = tcp_address ~net uri in
-            (addr, wrap uri @@ Eio.Net.connect ~sw net addr)
-        | None -> Fmt.failwith "HTTPS not enabled (for %a)" Uri.pp uri)
-    | x ->
-        Fmt.failwith "Unknown scheme %a"
-          Fmt.(option ~none:(any "None") Dump.string)
-          x
+  address_of_uri net uri
+  |> socket_of_address ~sw net https

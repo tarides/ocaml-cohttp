@@ -131,11 +131,11 @@ end = struct
 end
 
 module No_cache = struct
-  type t = unit
+  type t = S.t -> S.t
 
-  let call () : S.cache_call =
+  let call t : S.cache_call =
    fun t ~sw ?headers ?body ?(chunked = false) ?absolute_form meth uri ->
-    let _addr, socket = t ~sw uri in
+    let socket = t ~sw uri in
     let conn = Connection.create ~sw socket in
     let resp =
       Connection.call ~headers ~body ~chunked ~absolute_form meth uri conn
@@ -194,16 +194,17 @@ module Cache = struct
       () =
     { cache = Tbl.create () }
 
-  let call { cache } : S.cache_call =
-   fun t ~sw ?headers ?body ?(chunked = false) ?absolute_form meth uri ->
-    let addr, socket = t ~sw uri in
-    match Tbl.get addr cache with
-    | Some conn ->
-        Connection.call ~headers ~body ~chunked ~absolute_form meth uri conn
-    | None ->
-        let conn = Connection.create ~sw socket in
-        Tbl.add addr conn cache;
-        Connection.call ~headers ~body ~chunked ~absolute_form meth uri conn
+  let call { cache : _ } : S.cache_call = raise (Failure "TODO")
+  
+   (* fun t ~sw ?headers ?body ?(chunked = false) ?absolute_form meth uri -> *)
+   (*  let socket = t ~sw uri in *)
+   (*  match Tbl.get addr cache with *)
+   (*  | Some conn -> *)
+   (*      Connection.call ~headers ~body ~chunked ~absolute_form meth uri conn *)
+   (*  | None -> *)
+   (*      let conn = Connection.create ~sw socket in *)
+   (*      Tbl.add addr conn cache; *)
+   (*      Connection.call ~headers ~body ~chunked ~absolute_form meth uri conn *)
 end
 
 module StringSet = Set.Make (String)
