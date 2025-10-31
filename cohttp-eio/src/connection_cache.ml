@@ -212,6 +212,24 @@ module Make_proxy = struct
 
   let call { proxy } : S.cache_call =
    fun t ~sw ?headers ?body ?(chunked = false) ?absolute_form meth uri ->
+    (* connects to proxy instead of [uri] *)
+    let _addr, socket = t ~sw proxy in
+    let conn = Connection.create ~sw socket in
+    let resp =
+      Connection.call ~headers ~body ~chunked ~absolute_form meth uri conn
+    in
+    Connection.close conn;
+    resp
+
+  let create ~proxy = { proxy }
+end
+
+module Make_tunnel = struct
+  type t = { proxy : Uri.t }
+
+  let call { proxy } : S.cache_call =
+   fun t ~sw ?headers ?body ?(chunked = false) ?absolute_form meth uri ->
+    (* connects to proxy instead of [uri] *)
     let _addr, socket = t ~sw proxy in
     let conn = Connection.create ~sw socket in
     let resp =
@@ -346,6 +364,7 @@ module Proxy = struct
       Direct.create ?keep ?retry ?parallel ?depth () |> Direct.call
     in
     let create_direct proxy = Make_proxy.create ~proxy |> Make_proxy.call in
+    let create_tunnel proxy = Make_tunnel.create ~proxy |> Make_tunnel.call in
     let no_proxy_patterns = No_proxy.parse no_proxy in
     let no_proxy = create_default () in
 
@@ -354,7 +373,7 @@ module Proxy = struct
         (fun (scheme, uri) ->
           match StringSet.mem scheme tunnel_schemes with
           | true ->
-              let tunnel = Tunnel.create () |> Tunnel.call in
+              let tunnel = create_tunnel uri in
               (scheme, tunnel)
           | false ->
               let direct = create_direct uri in
@@ -366,7 +385,7 @@ module Proxy = struct
       | None -> (None, None)
       | Some uri ->
           let direct = create_direct uri in
-          let tunnel = Tunnel.create () |> Tunnel.call in
+          let tunnel = create_tunnel uri in
           (Some direct, Some tunnel)
     in
     { proxies; no_proxy; direct; tunnel; no_proxy_patterns }
