@@ -206,6 +206,23 @@ module Cache = struct
         Connection.call ~headers ~body ~chunked ~absolute_form meth uri conn
 end
 
+(* Uncached direct proxy *)
+module Make_proxy = struct
+  type t = { proxy : Uri.t }
+
+  let call { proxy } : S.cache_call =
+   fun t ~sw ?headers ?body ?(chunked = false) ?absolute_form meth uri ->
+    let _addr, socket = t ~sw proxy in
+    let conn = Connection.create ~sw socket in
+    let resp =
+      Connection.call ~headers ~body ~chunked ~absolute_form meth uri conn
+    in
+    Connection.close conn;
+    resp
+
+  let create ~proxy = { proxy }
+end
+
 module StringSet = Set.Make (String)
 
 let tunnel_schemes = StringSet.of_list [ "https" ]
@@ -328,31 +345,29 @@ module Proxy = struct
     let create_default () =
       Direct.create ?keep ?retry ?parallel ?depth () |> Direct.call
     in
+    let create_direct proxy = Make_proxy.create ~proxy |> Make_proxy.call in
     let no_proxy_patterns = No_proxy.parse no_proxy in
     let no_proxy = create_default () in
 
     let proxies =
       List.map
-        (fun (scheme, _uri) ->
+        (fun (scheme, uri) ->
           match StringSet.mem scheme tunnel_schemes with
           | true ->
               let tunnel = Tunnel.create () |> Tunnel.call in
               (scheme, tunnel)
           | false ->
-              let direct =
-                Direct.create ?keep ?retry ?parallel ?depth () |> Direct.call
-              in
+              let direct = create_direct uri in
               (scheme, direct))
         scheme_proxy
     in
     let direct, tunnel =
       match all_proxy with
-      | None -> None, None
-      | Some _uri_TODO ->
-          let direct = Direct.create ?keep ?retry ?parallel ?depth () |> Direct.call in
+      | None -> (None, None)
+      | Some uri ->
+          let direct = create_direct uri in
           let tunnel = Tunnel.create () |> Tunnel.call in
           (Some direct, Some tunnel)
-
     in
     { proxies; no_proxy; direct; tunnel; no_proxy_patterns }
 
