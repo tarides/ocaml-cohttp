@@ -60,43 +60,44 @@ end = struct
        messages from the stream. *)
     let send_request req = Eio.Stream.add request_stream req in
     let consume () =
-      Eio.Buf_write.with_flow socket @@ fun output ->
-      let loop () =
-        match Eio.Stream.take request_stream with
-        | None ->
-            (* Stream "closed", so we terminate *)
-            ()
-        | Some { request; body; resolver } -> (
-            let () =
-              Io.Request.write ~flush:false
-                (fun writer ->
-                  match body with
-                  | None -> ()
-                  | Some body ->
-                      flow_to_writer body writer Io.Request.write_body)
-                request output
-            in
-            let input = Eio.Buf_read.of_flow ~max_size:max_int socket in
-            match Io.Response.read input with
-            | `Eof -> failwith "connection closed by peer"
-            | `Invalid reason -> failwith reason
-            | `Ok response ->
-                let response =
-                  match Cohttp.Response.has_body response with
-                  | `No -> (response, Eio.Flow.string_source "")
-                  | `Yes | `Unknown ->
-                      let body =
-                        let reader =
-                          Io.Response.make_body_reader response input
-                        in
-                        flow_of_reader (fun () ->
-                            Io.Response.read_body_chunk reader)
-                      in
-                      (response, body)
+      Eio.Buf_write.with_flow socket (fun output ->
+          let rec loop () =
+            (match Eio.Stream.take request_stream with
+            | None ->
+                (* Stream "closed", so we terminate *)
+                ()
+            | Some { request; body; resolver } -> (
+                let () =
+                  Io.Request.write ~flush:false
+                    (fun writer ->
+                      match body with
+                      | None -> ()
+                      | Some body ->
+                          flow_to_writer body writer Io.Request.write_body)
+                    request output
                 in
-                Eio.Promise.resolve resolver response)
-      in
-      loop ()
+                let input = Eio.Buf_read.of_flow ~max_size:max_int socket in
+                match Io.Response.read input with
+                | `Eof -> failwith "connection closed by peer"
+                | `Invalid reason -> failwith reason
+                | `Ok response ->
+                    let response =
+                      match Cohttp.Response.has_body response with
+                      | `No -> (response, Eio.Flow.string_source "")
+                      | `Yes | `Unknown ->
+                          let body =
+                            let reader =
+                              Io.Response.make_body_reader response input
+                            in
+                            flow_of_reader (fun () ->
+                                Io.Response.read_body_chunk reader)
+                          in
+                          (response, body)
+                    in
+                    Eio.Promise.resolve resolver response));
+            loop ()
+          in
+          loop ())
     in
     Eio.Fiber.fork ~sw consume;
     send_request
@@ -225,20 +226,41 @@ module Make_proxy = struct
 end
 
 module Make_tunnel = struct
-  type t = { proxy : Uri.t }
+  type t = { proxy : Uri.t; proxy_headers : Http.Header.t option }
 
-  let call { proxy } : S.cache_call =
+  let setup_tunnel ~headers uri conn =
+    let r, _body =
+      Connection.call ~headers ~body:None ~chunked:false ~absolute_form:None
+        `CONNECT uri conn
+    in
+    Fmt.epr "TODO: Set up connect tunnel: %a\n" Http.Status.pp r.status;
+    ()
+
+  let call { proxy; proxy_headers } : S.cache_call =
    fun t ~sw ?headers ?body ?(chunked = false) ?absolute_form meth uri ->
     (* connects to proxy instead of [uri] *)
     let _addr, socket = t ~sw proxy in
     let conn = Connection.create ~sw socket in
+
+    setup_tunnel ~headers:proxy_headers uri conn;
+
     let resp =
       Connection.call ~headers ~body ~chunked ~absolute_form meth uri conn
     in
     Connection.close conn;
     resp
 
-  let create ~proxy = { proxy }
+  let proxy_default_scheme uri =
+    match Uri.scheme uri with
+    | None -> Uri.with_scheme uri (Some "http")
+    | _scheme_is_set -> uri
+
+  let create ?proxy_headers ~proxy () =
+    match Uri.host proxy with
+    | None -> Fmt.failwith "no host was provided in proxy URI %a" Uri.pp proxy
+    | Some _host ->
+        let proxy = proxy_default_scheme proxy in
+        { proxy; proxy_headers }
 end
 
 module StringSet = Set.Make (String)
@@ -359,12 +381,14 @@ module Proxy = struct
   }
 
   let create ?keep ?retry ?parallel ?depth ?(scheme_proxy = []) ?all_proxy
-      ?no_proxy ?proxy_headers:_ ~net:_ () =
+      ?no_proxy ?proxy_headers ~net:_ () =
     let create_default () =
       Direct.create ?keep ?retry ?parallel ?depth () |> Direct.call
     in
     let create_direct proxy = Make_proxy.create ~proxy |> Make_proxy.call in
-    let create_tunnel proxy = Make_tunnel.create ~proxy |> Make_tunnel.call in
+    let create_tunnel proxy =
+      Make_tunnel.create ?proxy_headers ~proxy () |> Make_tunnel.call
+    in
     let no_proxy_patterns = No_proxy.parse no_proxy in
     let no_proxy = create_default () in
 
