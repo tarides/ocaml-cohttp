@@ -61,8 +61,9 @@ end = struct
     let send_request req = Eio.Stream.add request_stream req in
     let consume () =
       Eio.Buf_write.with_flow socket (fun output ->
+          let input = Eio.Buf_read.of_flow ~max_size:max_int socket in
           let rec loop () =
-            (match Eio.Stream.take request_stream with
+            match Eio.Stream.take request_stream with
             | None ->
                 (* Stream "closed", so we terminate *)
                 ()
@@ -76,7 +77,6 @@ end = struct
                           flow_to_writer body writer Io.Request.write_body)
                     request output
                 in
-                let input = Eio.Buf_read.of_flow ~max_size:max_int socket in
                 match Io.Response.read input with
                 | `Eof -> failwith "connection closed by peer"
                 | `Invalid reason -> failwith reason
@@ -94,8 +94,8 @@ end = struct
                           in
                           (response, body)
                     in
-                    Eio.Promise.resolve resolver response));
-            loop ()
+                    Eio.Promise.resolve resolver response;
+                    loop ())
           in
           loop ())
     in
