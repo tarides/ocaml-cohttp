@@ -27,10 +27,13 @@ let run_client url all_proxy no_proxy http_proxy https_proxy proxy_auth =
   let client = Client.make ~https:None net in
   Eio.Switch.run @@ fun sw ->
   let resp, body = Client.get ~sw client url in
+  let () =
   match resp.status with
   | `OK ->
       print_string @@ Eio.Buf_read.(parse_exn take_all) body ~max_size:max_int
   | otherwise -> Fmt.epr "Unexpected HTTP status: %a\n" Http.Status.pp otherwise
+  in
+  Cache.shutdown cache
 
 let uri_conv =
   let parser s =
