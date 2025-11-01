@@ -157,6 +157,7 @@ module Cache = struct
     val create : unit -> t
     val get : key -> t -> value option
     val add : key -> value -> t -> unit
+    val iter : (key -> value -> unit) -> t -> unit
   end = struct
     type key = Eio.Net.Sockaddr.stream
     type value = Connection.t
@@ -187,6 +188,10 @@ module Cache = struct
              multiple  values for a key, but we don't currently support caching
              multiple connections for the same endpoint.  *)
           Hashtbl.replace t.hashtbl k v)
+
+    let iter f (t : t) =
+      Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+          Hashtbl.iter f t.hashtbl)
   end
 
   type t = { cache : Tbl.t }
@@ -205,6 +210,8 @@ module Cache = struct
         let conn = Connection.create ~sw socket in
         Tbl.add addr conn cache;
         Connection.call ~headers ~body ~chunked ~absolute_form meth uri conn
+
+  let shutdown t = Tbl.iter (fun _ conn -> Connection.close conn) t.cache
 end
 
 (* Uncached direct proxy *)
@@ -376,15 +383,15 @@ module Proxy = struct
     proxies : (string * S.cache_call) list;
     no_proxy : S.cache_call;
     no_proxy_patterns : No_proxy.t;
+    cache : Direct.t;
     direct : S.cache_call option;
     tunnel : S.cache_call option;
   }
 
   let create ?keep ?retry ?parallel ?depth ?(scheme_proxy = []) ?all_proxy
       ?no_proxy ?proxy_headers ~net:_ () =
-    let create_default () =
-      Direct.create ?keep ?retry ?parallel ?depth () |> Direct.call
-    in
+    let cache = Direct.create ?keep ?retry ?parallel ?depth () in
+    let create_default () = cache |> Direct.call in
     let create_direct proxy = Make_proxy.create ~proxy |> Make_proxy.call in
     let create_tunnel proxy =
       Make_tunnel.create ?proxy_headers ~proxy () |> Make_tunnel.call
@@ -404,6 +411,7 @@ module Proxy = struct
               (scheme, direct))
         scheme_proxy
     in
+
     let direct, tunnel =
       match all_proxy with
       | None -> (None, None)
@@ -412,7 +420,7 @@ module Proxy = struct
           let tunnel = create_tunnel uri in
           (Some direct, Some tunnel)
     in
-    { proxies; no_proxy; direct; tunnel; no_proxy_patterns }
+    { proxies; no_proxy; direct; tunnel; no_proxy_patterns; cache }
 
   let call (t : t) : S.cache_call =
    fun t' ~sw ?headers ?body ?chunked ?absolute_form meth uri ->
@@ -434,4 +442,6 @@ module Proxy = struct
     match proxy with
     | None -> t.no_proxy ~sw ?headers ?body ?chunked ?absolute_form t' meth uri
     | Some proxy -> proxy ~sw ?headers ?body ?chunked ?absolute_form t' meth uri
+
+  let shutdown t = Direct.shutdown t.cache
 end

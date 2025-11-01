@@ -40,6 +40,8 @@ module Cache : sig
         maximum number of requests to queue and / or send on a single
         connection.
       @param proxy A direct (non-tunneling) proxy to use. *)
+
+  val shutdown : t -> unit
 end
 [@@warning "-unused-functor-parameter"]
 
@@ -90,4 +92,6 @@ module Proxy : sig
         Disable proxies for specific hosts, specified as curl's [NO_PROXY].
       @see <https://everything.curl.dev/usingcurl/proxies/env.html#no-proxy>
       @param proxy_headers Headers to pass to the proxy. *)
+
+  val shutdown : t -> unit
 end
