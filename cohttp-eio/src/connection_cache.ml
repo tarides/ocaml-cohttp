@@ -68,6 +68,8 @@ end = struct
                 (* Stream "closed", so we terminate *)
                 ()
             | Some { request; body; resolver } -> (
+                (* TODO RM tracing *)
+                Eio.Std.traceln "Request %a" Http.Request.pp request;
                 let () =
                   Io.Request.write ~flush:false
                     (fun writer ->
@@ -94,6 +96,9 @@ end = struct
                           in
                           (response, body)
                     in
+                    (* TODO RM tracing *)
+                    Eio.Std.traceln "Response %a" Http.Response.pp
+                      (fst response);
                     Eio.Promise.resolve resolver response;
                     loop ())
           in
@@ -243,14 +248,13 @@ module Make_tunnel = struct
     Fmt.epr "TODO: Set up connect tunnel: %a\n" Http.Status.pp r.status;
     ()
 
-  let call { proxy; proxy_headers } : S.cache_call =
+  let call { proxy = proxy_uri; proxy_headers } : S.cache_call =
    fun t ~sw ?headers ?body ?(chunked = false) ?absolute_form meth uri ->
     (* connects to proxy instead of [uri] *)
-    let _addr, socket = t ~sw proxy in
+    let _addr, socket = t ~sw proxy_uri in
     let conn = Connection.create ~sw socket in
 
     setup_tunnel ~headers:proxy_headers uri conn;
-
     let resp =
       Connection.call ~headers ~body ~chunked ~absolute_form meth uri conn
     in
