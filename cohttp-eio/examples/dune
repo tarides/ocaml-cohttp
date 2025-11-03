@@ -1,5 +1,12 @@
 (executables
- (names server1 server2 client1 docker_client client_timeout client_tls)
+ (names
+  server1
+  server2
+  client1
+  docker_client
+  client_timeout
+  client_tls
+  client_proxy)
  (libraries
   cohttp-eio
   eio_main
@@ -10,7 +17,8 @@
   logs.threaded
   tls-eio
   ca-certs
-  mirage-crypto-rng.unix))
+  mirage-crypto-rng.unix
+  cmdliner))
 
 (alias
  (name runtest)

@@ -4,6 +4,49 @@ open Utils
 type connection = Eio.Flow.two_way_ty r
 type t = sw:Switch.t -> Uri.t -> connection
 
+let call_on_socket ~sw ?headers ?body ?(chunked = false) meth uri socket =
+  let body_length =
+    if chunked then None
+    else
+      match body with
+      | None -> Some 0L
+      | Some (Eio.Resource.T (body, ops)) ->
+          let module X = (val Eio.Resource.get ops Eio.Flow.Pi.Source) in
+          List.find_map
+            (function
+              | Body.String m -> Some (String.length (m body) |> Int64.of_int)
+              | _ -> None)
+            X.read_methods
+  in
+  let request =
+    Cohttp.Request.make_for_client ?headers
+      ~chunked:(Option.is_none body_length)
+      ?body_length meth uri
+  in
+  Eio.Buf_write.with_flow socket @@ fun output ->
+  let () =
+    Eio.Fiber.fork ~sw @@ fun () ->
+    Io.Request.write ~flush:false
+      (fun writer ->
+        match body with
+        | None -> ()
+        | Some body -> flow_to_writer body writer Io.Request.write_body)
+      request output
+  in
+  let input = Eio.Buf_read.of_flow ~max_size:max_int socket in
+  match Io.Response.read input with
+  | `Eof -> failwith "connection closed by peer"
+  | `Invalid reason -> failwith reason
+  | `Ok response -> (
+      match Cohttp.Response.has_body response with
+      | `No -> (response, Eio.Flow.string_source "")
+      | `Yes | `Unknown ->
+          let body =
+            let reader = Io.Response.make_body_reader response input in
+            flow_of_reader (fun () -> Io.Response.read_body_chunk reader)
+          in
+          (response, body))
+
 include
   Cohttp.Generic.Client.Make
     (struct
@@ -15,48 +58,49 @@ include
 
       let call (t : t) ~sw ?headers ?body ?(chunked = false) meth uri =
         let socket = t ~sw uri in
-        let body_length =
-          if chunked then None
-          else
-            match body with
-            | None -> Some 0L
-            | Some (Eio.Resource.T (body, ops)) ->
-                let module X = (val Eio.Resource.get ops Eio.Flow.Pi.Source) in
-                List.find_map
-                  (function
-                    | Body.String m ->
-                        Some (String.length (m body) |> Int64.of_int)
-                    | _ -> None)
-                  X.read_methods
-        in
-        let request =
-          Cohttp.Request.make_for_client ?headers
-            ~chunked:(Option.is_none body_length)
-            ?body_length meth uri
-        in
-        Eio.Buf_write.with_flow socket @@ fun output ->
-        let () =
-          Eio.Fiber.fork ~sw @@ fun () ->
-          Io.Request.write ~flush:false
-            (fun writer ->
-              match body with
-              | None -> ()
-              | Some body -> flow_to_writer body writer Io.Request.write_body)
-            request output
-        in
-        let input = Eio.Buf_read.of_flow ~max_size:max_int socket in
-        match Io.Response.read input with
-        | `Eof -> failwith "connection closed by peer"
-        | `Invalid reason -> failwith reason
-        | `Ok response -> (
-            match Cohttp.Response.has_body response with
-            | `No -> (response, Eio.Flow.string_source "")
-            | `Yes | `Unknown ->
-                let body =
-                  let reader = Io.Response.make_body_reader response input in
-                  flow_of_reader (fun () -> Io.Response.read_body_chunk reader)
-                in
-                (response, body))
+        call_on_socket ~sw ?headers ?body ~chunked meth uri socket
+      (* let body_length = *)
+      (*   if chunked then None *)
+      (*   else *)
+      (*     match body with *)
+      (*     | None -> Some 0L *)
+      (*     | Some (Eio.Resource.T (body, ops)) -> *)
+      (*         let module X = (val Eio.Resource.get ops Eio.Flow.Pi.Source) in *)
+      (*         List.find_map *)
+      (*           (function *)
+      (*             | Body.String m -> *)
+      (*                 Some (String.length (m body) |> Int64.of_int) *)
+      (*             | _ -> None) *)
+      (*           X.read_methods *)
+      (* in *)
+      (* let request = *)
+      (*   Cohttp.Request.make_for_client ?headers *)
+      (*     ~chunked:(Option.is_none body_length) *)
+      (*     ?body_length meth uri *)
+      (* in *)
+      (* Eio.Buf_write.with_flow socket @@ fun output -> *)
+      (* let () = *)
+      (*   Eio.Fiber.fork ~sw @@ fun () -> *)
+      (*   Io.Request.write ~flush:false *)
+      (*     (fun writer -> *)
+      (*       match body with *)
+      (*       | None -> () *)
+      (*       | Some body -> flow_to_writer body writer Io.Request.write_body) *)
+      (*     request output *)
+      (* in *)
+      (* let input = Eio.Buf_read.of_flow ~max_size:max_int socket in *)
+      (* match Io.Response.read input with *)
+      (* | `Eof -> failwith "connection closed by peer" *)
+      (* | `Invalid reason -> failwith reason *)
+      (* | `Ok response -> ( *)
+      (*     match Cohttp.Response.has_body response with *)
+      (*     | `No -> (response, Eio.Flow.string_source "") *)
+      (*     | `Yes | `Unknown -> *)
+      (*         let body = *)
+      (*           let reader = Io.Response.make_body_reader response input in *)
+      (*           flow_of_reader (fun () -> Io.Response.read_body_chunk reader) *)
+      (*         in *)
+      (*         (response, body)) *)
     end)
     (Io.IO)
 
@@ -96,7 +140,11 @@ let make ~https net : t =
     | Some "https" -> (
         match https with
         | Some wrap ->
-            wrap uri @@ Eio.Net.connect ~sw net (tcp_address ~net uri)
+            let proxy_uri = Uri.of_string "http://127.0.0.1:8888" in
+            let socket = Eio.Net.connect ~sw net (tcp_address ~net proxy_uri) in
+            let resp, _ = call_on_socket ~sw `CONNECT uri socket in
+            Fmt.pr "PROXY RESP: %a\n" Http.Response.pp resp;
+            wrap uri @@ socket
         | None -> Fmt.failwith "HTTPS not enabled (for %a)" Uri.pp uri)
     | x ->
         Fmt.failwith "Unknown scheme %a"
