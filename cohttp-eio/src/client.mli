@@ -31,3 +31,26 @@ val make_generic :
 
 val set_cache : S.cache_call -> unit
 (** Set a function used to process requests. Please see {!type:S.cache_call}. *)
+
+type client =
+  sw:Eio.Switch.t ->
+  Uri.t ->
+  (S.connection -> (Http.Response.t * body) io) ->
+  (Http.Response.t * body) io
+
+val make' :
+  https:
+    (Uri.t -> [ `Generic ] Eio.Net.stream_socket_ty r -> _ Eio.Flow.two_way)
+    option ->
+  _ Eio.Net.t ->
+  client
+
+val call' :
+  client ->
+  sw:Switch.t ->
+  ?headers:Cohttp.Header.t ->
+  ?body:[> Eio.Flow.source_ty ] r ->
+  ?chunked:bool ->
+  Cohttp.Code.meth ->
+  Uri.t ->
+  Http.Response.t * body
