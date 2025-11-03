@@ -1,6 +1,30 @@
 open Cohttp_eio
 module Cache = Cohttp_eio.Connection_cache.Proxy
 
+let authenticator =
+  match Ca_certs.authenticator () with
+  | Ok x -> x
+  | Error (`Msg m) ->
+      Fmt.failwith "Failed to create system store X509 authenticator: %s" m
+
+let () =
+  Logs.set_reporter (Logs_fmt.reporter ());
+  Logs_threaded.enable ();
+  Logs.Src.set_level Cohttp_eio.src (Some Debug)
+
+let https ~authenticator =
+  let tls_config =
+    match Tls.Config.client ~authenticator () with
+    | Error (`Msg msg) -> failwith ("tls configuration problem: " ^ msg)
+    | Ok tls_config -> tls_config
+  in
+  fun uri raw ->
+    let host =
+      Uri.host uri
+      |> Option.map (fun x -> Domain_name.(host_exn (of_string_exn x)))
+    in
+    Tls_eio.client_of_flow ?host tls_config raw
+
 let of_proxy ~scheme maybe_proxy =
   match maybe_proxy with None -> [] | Some proxy -> [ (scheme, proxy) ]
 
@@ -24,14 +48,16 @@ let run_client url all_proxy no_proxy http_proxy https_proxy proxy_auth =
     Cache.create ?all_proxy ~scheme_proxy ?no_proxy ?proxy_headers ~net ()
   in
   Client.set_cache (Cache.call cache);
-  let client = Client.make ~https:None net in
+  Mirage_crypto_rng_unix.use_default ();
+  let client = Client.make ~https:(Some (https ~authenticator)) net in
   Eio.Switch.run @@ fun sw ->
   let resp, body = Client.get ~sw client url in
   let () =
-  match resp.status with
-  | `OK ->
-      print_string @@ Eio.Buf_read.(parse_exn take_all) body ~max_size:max_int
-  | otherwise -> Fmt.epr "Unexpected HTTP status: %a\n" Http.Status.pp otherwise
+    match resp.status with
+    | `OK ->
+        print_string @@ Eio.Buf_read.(parse_exn take_all) body ~max_size:max_int
+    | otherwise ->
+        Fmt.epr "Unexpected HTTP status: %a\n" Http.Status.pp otherwise
   in
   Cache.shutdown cache
 
