@@ -22,23 +22,23 @@ include
 
 let make_generic fn = (fn :> S.t)
 
-let unix_address uri =
-  match Uri.host uri with
-  | Some path -> `Unix path
-  | None -> Fmt.failwith "no host specified (in %a)" Uri.pp uri
+(* let unix_address uri = *)
+(*   match Uri.host uri with *)
+(*   | Some path -> `Unix path *)
+(*   | None -> Fmt.failwith "no host specified (in %a)" Uri.pp uri *)
 
-let tcp_address ~net uri =
-  let service =
-    match Uri.port uri with
-    | Some port -> Int.to_string port
-    | _ -> Uri.scheme uri |> Option.value ~default:"http"
-  in
-  match
-    Eio.Net.getaddrinfo_stream ~service net
-      (Uri.host_with_default ~default:"localhost" uri)
-  with
-  | ip :: _ -> ip
-  | [] -> failwith "failed to resolve hostname"
+(* let tcp_address ~net uri = *)
+(*   let service = *)
+(*     match Uri.port uri with *)
+(*     | Some port -> Int.to_string port *)
+(*     | _ -> Uri.scheme uri |> Option.value ~default:"http" *)
+(*   in *)
+(*   match *)
+(*     Eio.Net.getaddrinfo_stream ~service net *)
+(*       (Uri.host_with_default ~default:"localhost" uri) *)
+(*   with *)
+(*   | ip :: _ -> ip *)
+(*   | [] -> failwith "failed to resolve hostname" *)
 
 let make ~https net : S.t =
   let net = (net :> [ `Generic ] Eio.Net.ty r) in
@@ -102,25 +102,62 @@ type client =
   (S.connection -> (Http.Response.t * body) io) ->
   (Http.Response.t * body) io
 
-type cache =
-  sw:Eio.Switch.t ->
-  Uri.t ->
-  (S.connection -> (Http.Response.t * body) io) ->
-  (Http.Response.t * body) io
 
-let cache () : cache = raise (Failure "TODO")
+let cache_key = Eio.Fiber.create_key ()
 
-let make' ~https net : client =
+let with_cache f =
+  Eio.Fiber.with_binding cache_key (Cache.Cache.create ()) f
+
+let get_cache () : Cache.Cache.t option =
+  Eio.Fiber.get cache_key
+
+(* let make_tunnel ~sw ~net ~fwd_uri socket  = *)
+(*   let socket = Eio.Net.connect ~sw net socket in *)
+(*   let resp, _ = call_on_socket ~sw `CONNECT fwd_uri socket in *)
+
+(* TODO: Read proxy from envvar *)
+let make' ?proxy ~https net : client =
   let net = (net :> [ `Generic ] Eio.Net.ty r) in
   let https =
     (https
-      :> (Uri.t -> [ `Generic ] Eio.Net.stream_socket_ty r -> S.connection)
-         option)
+     :> (Uri.t -> [ `Generic ] Eio.Net.stream_socket_ty r -> S.connection)
+          option)
   in
   fun ~sw uri call ->
-    let with_conn_cache = cache () in
-    (* let addr = Address.of_uri net uri in *)
-    with_conn_cache ~sw uri call
+  let cache = get_cache () in
+  let socket_addr, remote_addr =
+    match proxy with
+    | None -> let addr = Address.of_uri net uri in addr, addr
+    | Some proxy_uri -> Address.of_uri net proxy_uri, Address.of_uri net uri
+  in
+  match cache with
+  | None ->
+     (* TODO: support proxy calls *)
+     call (Address.to_socket ~sw net https remote_addr)
+  | Some cache ->
+     socket_addr
+     |> Address.socketaddr
+     |> Cache.Cache.get cache ~sw ~net
+     |> Cache.Connection.use (fun socket ->
+            match remote_addr with
+            | Plain (_, _) ->
+               traceln "Making plain call";
+               call (socket :> S.connection)
+            | Https (https_uri, _) ->
+               match https with
+               | None -> Fmt.failwith "HTTPS not enabled (for %a)" Uri.pp https_uri
+               | Some wrap ->
+                  match proxy with
+                  | None -> call (wrap https_uri socket)
+                  | Some _ ->
+                     traceln "Connecting to proxy";
+                     let resp, _ = call_on_socket ~sw `CONNECT https_uri socket in
+                     match Http.Response.status resp with
+                     | #Http.Status.success ->
+                        traceln "Connection established. Switching to tls.";
+                        call (wrap https_uri socket)
+                     | _ -> Fmt.failwith "Proxy could not form tunnel for %a" Uri.pp https_uri)
+
 (* let socket = Address.to_socket ~sw net https addr in *)
 (* f socket *)
 

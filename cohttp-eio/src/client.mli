@@ -32,6 +32,8 @@ val make_generic :
 val set_cache : S.cache_call -> unit
 (** Set a function used to process requests. Please see {!type:S.cache_call}. *)
 
+val with_cache : (unit -> 'a) -> 'a
+
 type client =
   sw:Eio.Switch.t ->
   Uri.t ->
@@ -39,6 +41,7 @@ type client =
   (Http.Response.t * body) io
 
 val make' :
+  ?proxy:Uri.t ->
   https:
     (Uri.t -> [ `Generic ] Eio.Net.stream_socket_ty r -> _ Eio.Flow.two_way)
     option ->

@@ -1,42 +1,44 @@
 (* TODO open Eio.Std *)
 open Utils
+open Eio.Std
 
-module Box : sig
-  type 'a t
+module Connection : sig
+  type t
 
-  val make : 'a -> 'a t
-  val take : 'a t -> 'a
-  val put : 'a t -> 'a -> unit
+  val make : [ `Generic ] Eio.Net.stream_socket_ty r -> t
+  val use : ([ `Generic ] Eio.Net.stream_socket_ty r -> 'a) -> t -> 'a
 end = struct
-  type 'a t = 'a Eio.Stream.t
+  type t =
+    { mutex : Eio.Mutex.t
+    ; socket : [ `Generic ] Eio.Net.stream_socket_ty r
+    }
 
-  let make x =
-    let s = Eio.Stream.create 1 in
-    let () = Eio.Stream.add s x in
-    s
+  let make socket =
+    { mutex = Eio.Mutex.create ()
+    ; socket
+    }
 
-  let take t = Eio.Stream.take t
-  let put t x = Eio.Stream.add t x
+  let use f {socket; mutex} =
+    Eio.Mutex.use_rw ~protect:false mutex (fun () -> f socket)
 end
 
-module Cache : sig
+module Cache
+  : sig
   type t
   type addr = Eio.Net.Sockaddr.stream
-  type conn = S.connection
+  type conn = Connection.t
 
   val create : unit -> t
-  val remove_conn : t -> addr -> unit
-  val take_conn : t -> addr -> conn option
-  val put_conn : t -> conn -> unit
-  val add_conn : t -> addr -> conn -> unit
-end = struct
+  val get : t -> sw:Eio.Switch.t -> net: _ Eio.Net.t -> addr -> Connection.t
+end
+= struct
   type addr = Eio.Net.Sockaddr.stream
-  type conn = S.connection
+  type conn = Connection.t
 
   type t = {
     (* We only cache for [stream] sockets, because we only care for what
          we can connect to via [Eio.Net.connect] *)
-    hashtbl : (addr, conn Box.t) Hashtbl.t;
+    hashtbl : (addr, Connection.t) Hashtbl.t;
     mutex : Eio.Mutex.t;
   }
 
@@ -46,42 +48,31 @@ end = struct
       mutex = Eio.Mutex.create ();
     }
 
-  let take_conn (t : t) addr =
-    Eio.Mutex.use_ro t.mutex (fun () ->
-        Hashtbl.find_opt t.hashtbl addr |> Option.map Box.take)
+  let remove {hashtbl; mutex} addr =
+    Eio.Mutex.use_rw ~protect:true mutex (fun () -> Hashtbl.remove hashtbl addr)
 
-  let put_conn (t : t) addr =
-    Eio.Mutex.use_ro t.mutex (fun () ->
-        Hashtbl.find_opt t.hashtbl addr |> Option.map Box.take)
 
-  let with_existing_conn (t : t) addr f =
-    (*  [protect] tells Eio to ensure the critical section cannot be canceled.
-          This ensures that a connection will not closed while it is use. *)
-    let protect = true in
+  let get (t : t) ~sw ~net addr =
+    let net = (net :> [ `Generic ] Eio.Net.ty r) in
+    let protect = false in
     Eio.Mutex.use_rw ~protect t.mutex (fun () ->
-        (* We use [replace] over [add] because the latter supports adding
-             multiple  values for a key, but we don't currently support caching
-             multiple connections for the same endpoint.  *)
         match Hashtbl.find_opt t.hashtbl addr with
-        | Some conn -> Some (f conn)
-        | None -> None)
-
-  let remove_conn (t : t) addr =
-    Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-        Hashtbl.remove t.hashtbl addr)
-
-  let with_new_conn ~sw (t : t) addr conn f =
-    Eio.Mutex.use_rw ~protect:false t.mutex (fun () ->
-        Hashtbl.add t.hashtbl addr conn;
-        Eio.Switch.on_release sw (fun () -> remove_conn t addr);
-        f conn)
+        | Some conn ->
+          traceln "Using cached conn";
+          conn
+        | None ->
+          traceln "Creating new conn";
+          let conn = Eio.Net.connect ~sw net addr |> Connection.make in
+          Hashtbl.add t.hashtbl addr conn;
+          (* The lifetime of a socket ends with the switch it's created with, so
+             we can also safely remove its entry from the cache *)
+          Eio.Switch.on_release sw (fun () -> remove t addr);
+          conn)
 end
 
 open Eio.Std
 
 type t = sw:Eio.Switch.t -> Uri.t -> S.connection
-
-let cache = ref (Cache.create ())
 
 let make ~https net : t =
   let net = (net :> [ `Generic ] Eio.Net.ty r) in
