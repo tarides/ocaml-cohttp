@@ -1,54 +1,6 @@
 (* TODO open Eio.Std *)
 open Utils
 
-module Cache' : sig
-  type t
-  type addr = Eio.Net.Sockaddr.stream
-  type conn = S.connection
-
-  val create : unit -> t
-  val remove_conn : t -> addr -> unit
-  val with_existing_conn : t -> addr -> (conn -> 'a) -> 'a option
-  val with_new_conn : sw:Eio.Switch.t -> t -> addr -> conn -> (conn -> 'a) -> 'a
-end = struct
-  type addr = Eio.Net.Sockaddr.stream
-  type conn = S.connection
-
-  type t = {
-    (* We only cache for [stream] sockets, because we only care for what
-         we can connect to via [Eio.Net.connect] *)
-    hashtbl : (addr, conn) Hashtbl.t;
-    mutex : Eio.Mutex.t;
-  }
-
-  let create () =
-    {
-      hashtbl = Hashtbl.create 10 (* TODO What is the right number here? *);
-      mutex = Eio.Mutex.create ();
-    }
-
-  let with_existing_conn (t : t) addr f =
-    (*  [protect] tells Eio to ensure the critical section cannot be canceled.
-          This ensures that a connection will not closed while it is use. *)
-    let protect = true in
-    Eio.Mutex.use_rw ~protect t.mutex (fun () ->
-        (* We use [replace] over [add] because the latter supports adding
-             multiple  values for a key, but we don't currently support caching
-             multiple connections for the same endpoint.  *)
-        match Hashtbl.find_opt t.hashtbl addr with
-        | Some conn -> Some (f conn)
-        | None -> None)
-
-  let remove_conn (t : t) addr =
-    Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-        Hashtbl.remove t.hashtbl addr)
-
-  let with_new_conn ~sw (t : t) addr conn f =
-    Eio.Mutex.use_rw ~protect:false t.mutex (fun () ->
-        Hashtbl.add t.hashtbl addr conn;
-        Eio.Switch.on_release sw (fun () -> remove_conn t addr);
-        f conn)
-end
 module Connection : sig
   type t
 

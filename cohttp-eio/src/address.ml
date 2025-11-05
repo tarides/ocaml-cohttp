@@ -38,6 +38,8 @@ let of_uri net uri =
 
 let socketaddr = function Https (_, addr) | Plain (_, addr) -> addr
 
+let to_uri = function Https (uri, _) | Plain (uri, _) -> uri
+
 let to_socket ~sw (net : _ Eio.Net.t) https address =
   let https =
     (https
@@ -50,3 +52,16 @@ let to_socket ~sw (net : _ Eio.Net.t) https address =
       match https with
       | Some wrap -> wrap uri @@ Eio.Net.connect ~sw net addr
       | None -> Fmt.failwith "HTTPS not enabled (for %a)" Uri.pp uri)
+
+(* let to_socket ~sw (net : _ Eio.Net.t) https address = *)
+(*   let https = *)
+(*     (https *)
+(*       :> (Uri.t -> [ `Generic ] Eio.Net.stream_socket_ty r -> S.connection) *)
+(*          option) *)
+(*   in *)
+(*   match address with *)
+(*   | Plain (_, addr) -> (Eio.Net.connect ~sw net addr :> S.connection) *)
+(*   | Https (uri, addr) -> ( *)
+(*       match https with *)
+(*       | Some wrap -> wrap uri @@ Eio.Net.connect ~sw net addr *)
+(*       | None -> Fmt.failwith "HTTPS not enabled (for %a)" Uri.pp uri) *)

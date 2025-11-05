@@ -115,6 +115,30 @@ let get_cache () : Cache.Cache.t option =
 (*   let socket = Eio.Net.connect ~sw net socket in *)
 (*   let resp, _ = call_on_socket ~sw `CONNECT fwd_uri socket in *)
 
+let make_tunnel ~sw https uri socket =
+  traceln "Connecting to proxy";
+  let resp, _ = call_on_socket ~sw `CONNECT uri socket in
+  match Http.Response.status resp with
+  | #Http.Status.success ->
+     traceln "Connection established. Switching to tls.";
+     https uri socket
+  | _ -> Fmt.failwith "Proxy could not form tunnel for %a" Uri.pp uri
+  
+let connect_to_addr_on_socket ~sw ~proxy ~https remote_addr socket =
+  match (remote_addr : Address.t) with
+  | Plain (_, _) ->
+     traceln "Making plain call";
+     (socket :> S.connection)
+  | Https (https_uri, _) ->
+     match https with
+     | None -> Fmt.failwith "HTTPS not enabled (for %a)" Uri.pp https_uri
+     | Some wrap ->
+        ____TODO
+        (* TODO: We are issuing double connects !!! We need to move the proxy logic into the cache to avoid this mess *)
+        match proxy with
+        | None -> wrap https_uri socket
+        | Some _ -> make_tunnel ~sw wrap https_uri socket
+  
 (* TODO: Read proxy from envvar *)
 let make' ?proxy ~https net : client =
   let net = (net :> [ `Generic ] Eio.Net.ty r) in
@@ -127,36 +151,24 @@ let make' ?proxy ~https net : client =
   let cache = get_cache () in
   let socket_addr, remote_addr =
     match proxy with
-    | None -> let addr = Address.of_uri net uri in addr, addr
-    | Some proxy_uri -> Address.of_uri net proxy_uri, Address.of_uri net uri
+    | Some proxy_uri -> (Address.of_uri net proxy_uri), Address.of_uri net uri
+    | None ->
+       let addr = Address.of_uri net uri in
+       addr, addr
   in
-  match cache with
-  | None ->
-     (* TODO: support proxy calls *)
-     call (Address.to_socket ~sw net https remote_addr)
-  | Some cache ->
-     socket_addr
-     |> Address.socketaddr
-     |> Cache.Cache.get cache ~sw ~net
-     |> Cache.Connection.use (fun socket ->
-            match remote_addr with
-            | Plain (_, _) ->
-               traceln "Making plain call";
-               call (socket :> S.connection)
-            | Https (https_uri, _) ->
-               match https with
-               | None -> Fmt.failwith "HTTPS not enabled (for %a)" Uri.pp https_uri
-               | Some wrap ->
-                  match proxy with
-                  | None -> call (wrap https_uri socket)
-                  | Some _ ->
-                     traceln "Connecting to proxy";
-                     let resp, _ = call_on_socket ~sw `CONNECT https_uri socket in
-                     match Http.Response.status resp with
-                     | #Http.Status.success ->
-                        traceln "Connection established. Switching to tls.";
-                        call (wrap https_uri socket)
-                     | _ -> Fmt.failwith "Proxy could not form tunnel for %a" Uri.pp https_uri)
+  let connection = 
+    match cache with
+    | None ->
+       traceln "Oneshot call";
+       let socket = Eio.Net.connect ~sw net (Address.socketaddr socket_addr) in
+       connect_to_addr_on_socket ~sw ~proxy ~https remote_addr socket
+    | Some cache ->
+       traceln "Calling with cache";
+       remote_addr
+       |> Cache.Cache.get cache ~sw ~net ~proxy:(Option.map (Address.of_uri net) proxy)
+       |> Cache.Connection.use (connect_to_addr_on_socket ~sw ~proxy ~https remote_addr)
+  in
+  call connection
 
 (* let socket = Address.to_socket ~sw net https addr in *)
 (* f socket *)
