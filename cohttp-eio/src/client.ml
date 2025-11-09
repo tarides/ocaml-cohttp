@@ -116,7 +116,7 @@ let get_cache () : Cache.Cache.t option =
 (*   let resp, _ = call_on_socket ~sw `CONNECT fwd_uri socket in *)
 
 let make_tunnel ~sw https uri socket =
-  traceln "Connecting to proxy";
+  traceln "Creating tunnel with proxy";
   let resp, _ = call_on_socket ~sw `CONNECT uri socket in
   match Http.Response.status resp with
   | #Http.Status.success ->
@@ -133,7 +133,6 @@ let connect_to_addr_on_socket ~sw ~proxy ~https remote_addr socket =
      match https with
      | None -> Fmt.failwith "HTTPS not enabled (for %a)" Uri.pp https_uri
      | Some wrap ->
-        ____TODO
         (* TODO: We are issuing double connects !!! We need to move the proxy logic into the cache to avoid this mess *)
         match proxy with
         | None -> wrap https_uri socket
@@ -149,26 +148,34 @@ let make' ?proxy ~https net : client =
   in
   fun ~sw uri call ->
   let cache = get_cache () in
-  let socket_addr, remote_addr =
+  let socket_addr, remote_addr, cache_addr =
     match proxy with
-    | Some proxy_uri -> (Address.of_uri net proxy_uri), Address.of_uri net uri
     | None ->
        let addr = Address.of_uri net uri in
-       addr, addr
+       addr, addr, addr
+    | Some proxy_uri ->
+       let remote_addr = Address.of_uri net uri in
+       match remote_addr with
+       | Https _ -> (Address.of_uri net proxy_uri), remote_addr, remote_addr
+       | Plain _ -> let proxy_addr = Address.of_uri net proxy_uri in proxy_addr, remote_addr, proxy_addr
   in
-  let connection = 
-    match cache with
-    | None ->
-       traceln "Oneshot call";
-       let socket = Eio.Net.connect ~sw net (Address.socketaddr socket_addr) in
-       connect_to_addr_on_socket ~sw ~proxy ~https remote_addr socket
-    | Some cache ->
-       traceln "Calling with cache";
-       remote_addr
-       |> Cache.Cache.get cache ~sw ~net ~proxy:(Option.map (Address.of_uri net) proxy)
-       |> Cache.Connection.use (connect_to_addr_on_socket ~sw ~proxy ~https remote_addr)
-  in
-  call connection
+  match cache with
+  | None ->
+     traceln "Oneshot call";
+     let socket = Eio.Net.connect ~sw net (Address.socketaddr socket_addr) in
+     call @@ connect_to_addr_on_socket ~sw ~proxy ~https remote_addr socket
+  | Some cache ->
+     traceln "Calling with cache";
+     match Cache.Cache.get cache (Address.socketaddr remote_addr) with
+     | Some conn -> Cache.Connection.use conn (fun socket -> call (socket :> S.connection))
+     | None ->
+        traceln "Cached connection not found. Opening socket to %a" Eio.Net.Sockaddr.pp (Address.socketaddr socket_addr);
+        let socket = Eio.Net.connect ~sw net (Address.socketaddr socket_addr) in
+        let socket' = connect_to_addr_on_socket ~sw ~proxy ~https remote_addr socket in
+        (* We cannot simply create a new connection and add it, because...?  *)
+        Cache.Cache.add cache (Address.socketaddr cache_addr) socket';
+        call socket'
+(* |> Cache.Connection.use (connect_to_addr_on_socket ~sw ~proxy ~https remote_addr) *)
 
 (* let socket = Address.to_socket ~sw net https addr in *)
 (* f socket *)
