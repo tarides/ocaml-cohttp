@@ -27,7 +27,6 @@ let get_proxy uri =
       | Some (Proxy.Tunnel p) -> Some (Proxy.Tunnel (headers, p)))
 
 let call_on_socket ~sw ?headers ?body ?(chunked = false) meth uri socket =
-  traceln "sending %a to %a" Http.Method.pp meth Uri.pp uri;
   let body_length =
     if chunked then None
     else
@@ -141,7 +140,6 @@ let make ~https net : t =
       | None -> scheme_conn_of_uri ~sw net uri
       | Some (Proxy.Direct proxy_uri) -> scheme_conn_of_uri ~sw net proxy_uri
       | Some (Proxy.Tunnel (proxy_headers, proxy_uri)) -> (
-          traceln "Connecting with tunnel to %a" Uri.pp proxy_uri;
           let conn =
             match scheme_conn_of_uri ~sw net proxy_uri with
             | `Plain socket -> socket
